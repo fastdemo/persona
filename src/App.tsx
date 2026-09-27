@@ -144,6 +144,21 @@ export default function App() {
   const boxes = BOXES[game];
   const canvasH = game === 'P5' ? 500 : 800;
 
+  // Canvas is "loading" until the active renderer reports every source image
+  // complete AND the dialogue font applied. Flips back on every game/asset
+  // change so a slow portrait can never leave a half-painted frame.
+  const [canvasReady, setCanvasReady] = useState(false);
+  const readyGameRef = useRef<Game>('P5');
+
+  useEffect(() => {
+    readyGameRef.current = game;
+    setCanvasReady(false);
+  }, [game, portrait, boxType, font, custom]);
+
+  const handleReady = (ready: boolean) => {
+    if (readyGameRef.current === game) setCanvasReady(ready);
+  };
+
   return (
     <div className={`app${flash % 2 ? ' flash go' : ' flash'}`} key={flash}>
       <header className="topbar">
@@ -284,7 +299,11 @@ export default function App() {
         </aside>
 
         <main className="stage">
-          <div className="canvas-card">
+          <div className="canvas-card" data-ready={canvasReady}>
+            <div className="canvas-loading" hidden={canvasReady} role="status" aria-live="polite">
+              <div className="canvas-spinner" aria-hidden="true" />
+              <span>Loading dialogue assets…</span>
+            </div>
             {game === 'P5' ? (
               <P5Canvas
                 portrait={portrait}
@@ -296,6 +315,7 @@ export default function App() {
                 emote={emote}
                 costume={costume}
                 boxType={boxType}
+                onReadyChange={handleReady}
               />
             ) : (
               <P4Canvas
@@ -308,6 +328,7 @@ export default function App() {
                 emote={emote}
                 costume={costume}
                 boxType={boxType}
+                onReadyChange={handleReady}
               />
             )}
           </div>

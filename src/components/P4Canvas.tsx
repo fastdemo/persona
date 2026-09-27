@@ -1,5 +1,4 @@
-import { useEffect, useRef } from 'react';
-import FontFaceObserver from 'fontfaceobserver';
+import { useEffect, useRef, useState } from 'react';
 import findPosition from '../engine/p4/portraitPositions';
 import findWidth from '../engine/p4/portraitWidths';
 
@@ -15,6 +14,10 @@ export interface P4CanvasState {
   boxType: string; // 'golden' | 'vanilla'
 }
 
+interface Props extends P4CanvasState {
+  onReadyChange?: (ready: boolean) => void;
+}
+
 const W = 1275;
 const H = 800;
 
@@ -25,30 +28,67 @@ const BOX_POS: Record<string, number[]> = {
   vanillaFront: [75, 600, 1200, 175],
 };
 
+const withCacheBuster = (src: string) => (src.includes('?') ? `${src}&r=1` : `${src}?r=1`);
+
 /**
  * Single-canvas P4 renderer. Draw order: background -> portrait -> box back ->
  * box front -> name + dialogue text. Keeps the original positions, widths,
  * and per-version layout.
+ *
+ * Reliability: every source image bumps `assetTick` on load AND error, so the
+ * paint effect re-runs as assets arrive — first paint no longer depends on the
+ * user typing. Fonts are awaited via document.fonts with a bounded poll.
  */
-export default function P4Canvas(props: P4CanvasState) {
-  const { portrait, custom, name, text, font, char, emote, costume, boxType } = props;
+export default function P4Canvas(props: Props) {
+  const { portrait, custom, name, text, font, char, emote, costume, boxType, onReadyChange } = props;
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const bgRef = useRef<HTMLImageElement>(null);
   const portraitRef = useRef<HTMLImageElement>(null);
   const customRef = useRef<HTMLImageElement>(null);
   const backRef = useRef<HTMLImageElement>(null);
   const frontRef = useRef<HTMLImageElement>(null);
+  const fontOkRef = useRef(false);
+  const readyRef = useRef(false);
+  const readyCbRef = useRef(onReadyChange);
+  readyCbRef.current = onReadyChange;
+
   const version = boxType === 'vanilla' ? 'vanilla' : 'golden';
 
+  const [assetTick, setAssetTick] = useState(0);
+  const [imgRetry, setImgRetry] = useState(0);
+
+  const bump = () => setAssetTick((t) => t + 1);
+
+  // New portrait URL -> allow one retry again.
   useEffect(() => {
-    let cancelled = false;
+    setImgRetry(0);
+  }, [portrait]);
+
+  useEffect(() => {
+    let alive = true;
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
+    fontOkRef.current = false;
+
+    const report = () => {
+      const bgOk = !bgRef.current || bgRef.current.complete;
+      const backOk = !backRef.current || backRef.current.complete;
+      const frontOk = !frontRef.current || frontRef.current.complete;
+      const porEl = portraitRef.current;
+      const porOk = char === 'None' || !portrait || (porEl ? porEl.complete : true);
+      const cusEl = customRef.current;
+      const cusOk = !custom || (cusEl ? cusEl.complete : true);
+      const ready = bgOk && backOk && frontOk && porOk && cusOk && fontOkRef.current;
+      if (ready !== readyRef.current) {
+        readyRef.current = ready;
+        readyCbRef.current?.(ready);
+      }
+    };
 
     const draw = () => {
-      if (cancelled) return;
+      if (!alive) return;
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.clearRect(0, 0, W, H);
 
@@ -132,29 +172,78 @@ export default function P4Canvas(props: P4CanvasState) {
         ctx.fillText(rows[1], 100, 690);
         ctx.fillText(rows[2], 100, 735);
       }
+
+      report();
     };
 
-    try {
-      new FontFaceObserver(font).load(null, 2000).then(draw).catch(draw);
-    } catch {
+    const markFontOk = () => {
+      if (!alive) return;
+      fontOkRef.current = true;
       draw();
-    }
-    const t = setTimeout(draw, 50);
-    return () => {
-      cancelled = true;
-      clearTimeout(t);
     };
-  }, [portrait, custom, name, text, font, char, emote, costume, boxType, version]);
+
+    // Bounded font wait: poll document.fonts so a slow font can't leave the
+    // canvas stuck in a fallback face. Caps at ~10s, then paints regardless.
+    const ensureFont = (triesLeft: number) => {
+      if (!alive) return;
+      let ok = true;
+      try {
+        ok = !document.fonts?.check || document.fonts.check(`26pt "${font}"`, name || 'A');
+      } catch {
+        ok = true;
+      }
+      if (ok || triesLeft <= 0) {
+        markFontOk();
+        return;
+      }
+      setTimeout(() => ensureFont(triesLeft - 1), 250);
+    };
+
+    draw();
+    try {
+      const loader = document.fonts?.load(`26pt "${font}"`, name || 'A');
+      if (loader && typeof loader.then === 'function') {
+        loader.then(
+          () => ensureFont(40),
+          () => ensureFont(40),
+        );
+      } else {
+        ensureFont(40);
+      }
+    } catch {
+      ensureFont(0);
+    }
+
+    return () => {
+      alive = false;
+    };
+  }, [portrait, custom, name, text, font, char, emote, costume, boxType, version, assetTick, imgRetry]);
+
+  const onPortraitError = () => {
+    if (imgRetry === 0 && portrait) {
+      setImgRetry(1);
+    } else {
+      bump();
+    }
+  };
 
   return (
     <div className="canvas-frame">
       <canvas ref={canvasRef} id="dialogueCanvas" width={W} height={H} />
-      <img ref={bgRef} className="hidden-img" alt="" src="img/p4-background.png" crossOrigin="anonymous" />
+      <img ref={bgRef} className="hidden-img" alt="" src="img/p4-background.png" crossOrigin="anonymous" onLoad={bump} onError={bump} />
       {portrait && char !== 'None' ? (
-        <img ref={portraitRef} className="hidden-img" alt="portrait" src={portrait} crossOrigin="anonymous" />
+        <img
+          ref={portraitRef}
+          className="hidden-img"
+          alt="portrait"
+          src={imgRetry ? withCacheBuster(portrait) : portrait}
+          crossOrigin="anonymous"
+          onLoad={bump}
+          onError={onPortraitError}
+        />
       ) : null}
       {custom ? (
-        <img ref={customRef} className="hidden-img" alt="custom portrait" src={custom} crossOrigin="anonymous" />
+        <img ref={customRef} className="hidden-img" alt="custom portrait" src={custom} crossOrigin="anonymous" onLoad={bump} onError={bump} />
       ) : null}
       <img
         ref={backRef}
@@ -162,6 +251,8 @@ export default function P4Canvas(props: P4CanvasState) {
         alt="dialogue box back"
         src={`boxes/p4/db-${version}-back.png`}
         crossOrigin="anonymous"
+        onLoad={bump}
+        onError={bump}
       />
       <img
         ref={frontRef}
@@ -169,6 +260,8 @@ export default function P4Canvas(props: P4CanvasState) {
         alt="dialogue box front"
         src={`boxes/p4/db-${version}-front.png`}
         crossOrigin="anonymous"
+        onLoad={bump}
+        onError={bump}
       />
     </div>
   );

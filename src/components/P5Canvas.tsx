@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from 'react';
-import FontFaceObserver from 'fontfaceobserver';
 import { simplePositions, findSpecialPosition } from '../engine/p5/portraitPositions';
 import { findRandomNumbers, findTextCoords } from '../engine/p5/nameAndTextTools';
 import { nameBoxUrl } from '../data/game';
@@ -28,23 +27,36 @@ const ANGLE: Record<string, number> = {
 
 interface Props extends P5CanvasState {
   onBoxArt?: (kind: 'small' | 'medium' | 'large' | 'named') => void;
+  onReadyChange?: (ready: boolean) => void;
 }
+
+const withCacheBuster = (src: string) => (src.includes('?') ? `${src}&r=1` : `${src}?r=1`);
 
 /**
  * Single-canvas P5 renderer. Draw order: background -> portrait -> name box art
  * -> name tiles + name text -> dialogue text. Keeps the original rotation math,
  * name-tile effect, and per-character box art.
+ *
+ * Reliability: every source image bumps `assetTick` on load AND error, so the
+ * paint effect re-runs as assets arrive — first paint no longer depends on the
+ * user typing. Fonts are awaited via document.fonts with a bounded poll.
  */
 export default function P5Canvas(props: Props) {
-  const { portrait, custom, name, text, font, char, emote, costume, boxType, onBoxArt } = props;
+  const { portrait, custom, name, text, font, char, emote, costume, boxType, onBoxArt, onReadyChange } = props;
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const bgRef = useRef<HTMLImageElement>(null);
   const portraitRef = useRef<HTMLImageElement>(null);
   const customRef = useRef<HTMLImageElement>(null);
   const boxRef = useRef<HTMLImageElement>(null);
-  const boxUrlRef = useRef('');
   const tileSeedRef = useRef<{ name: string; picks: (number | null)[] }>({ name: '', picks: [] });
+  const fontOkRef = useRef(false);
+  const readyRef = useRef(false);
+  const readyCbRef = useRef(onReadyChange);
+  readyCbRef.current = onReadyChange;
+
   const [blankKind, setBlankKind] = useState<'small' | 'medium' | 'large'>('small');
+  const [assetTick, setAssetTick] = useState(0);
+  const [imgRetry, setImgRetry] = useState(0);
 
   const boxUrl = (() => {
     const named = nameBoxUrl(font, name, boxType);
@@ -60,19 +72,41 @@ export default function P5Canvas(props: Props) {
   // boxes all share x=320 — do the same here.
   const BOX_X = 320;
 
+  const bump = () => setAssetTick((t) => t + 1);
+
   useEffect(() => {
     tileSeedRef.current = { name: '', picks: [] };
   }, [boxType]);
 
+  // New portrait URL -> allow one retry again.
   useEffect(() => {
-    let cancelled = false;
+    setImgRetry(0);
+  }, [portrait]);
+
+  useEffect(() => {
+    let alive = true;
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
+    fontOkRef.current = false;
+
+    const report = () => {
+      const bgOk = !bgRef.current || bgRef.current.complete;
+      const boxOk = !boxRef.current || boxRef.current.complete;
+      const porEl = portraitRef.current;
+      const porOk = char === 'None' || !portrait || (porEl ? porEl.complete : true);
+      const cusEl = customRef.current;
+      const cusOk = !custom || (cusEl ? cusEl.complete : true);
+      const ready = bgOk && boxOk && porOk && cusOk && fontOkRef.current;
+      if (ready !== readyRef.current) {
+        readyRef.current = ready;
+        readyCbRef.current?.(ready);
+      }
+    };
 
     const draw = () => {
-      if (cancelled) return;
+      if (!alive) return;
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.clearRect(0, 0, W, H);
 
@@ -112,7 +146,7 @@ export default function P5Canvas(props: Props) {
       // itself position the nameplate (named art includes the name glyphs,
       // blank small/medium/large grows 250->266->284px tall).
       const boxImg = boxRef.current;
-      if (boxImg && boxImg.complete && boxImg.naturalWidth > 0 && boxUrlRef.current === boxUrl) {
+      if (boxImg && boxImg.complete && boxImg.naturalWidth > 0) {
         const bw = boxImg.naturalWidth;
         const bh = boxImg.naturalHeight;
         if (boxType === 'main') {
@@ -290,19 +324,52 @@ export default function P5Canvas(props: Props) {
         ctx.fillText(rows[2], coords[0], coords[3]);
       }
       ctx.restore();
+
+      report();
     };
 
-    try {
-      new FontFaceObserver(font).load(null, 2000).then(draw).catch(draw);
-    } catch {
+    const markFontOk = () => {
+      if (!alive) return;
+      fontOkRef.current = true;
       draw();
-    }
-    const t = setTimeout(draw, 50);
-    return () => {
-      cancelled = true;
-      clearTimeout(t);
     };
-  }, [portrait, custom, name, text, font, char, emote, costume, boxType, boxUrl]);
+
+    // Bounded font wait: poll document.fonts so a slow font can't leave the
+    // canvas stuck in a fallback face. Caps at ~10s, then paints regardless.
+    const ensureFont = (triesLeft: number) => {
+      if (!alive) return;
+      let ok = true;
+      try {
+        ok = !document.fonts?.check || document.fonts.check(`18pt "${font}"`, name || 'A');
+      } catch {
+        ok = true;
+      }
+      if (ok || triesLeft <= 0) {
+        markFontOk();
+        return;
+      }
+      setTimeout(() => ensureFont(triesLeft - 1), 250);
+    };
+
+    draw();
+    try {
+      const loader = document.fonts?.load(`18pt "${font}"`, name || 'A');
+      if (loader && typeof loader.then === 'function') {
+        loader.then(
+          () => ensureFont(40),
+          () => ensureFont(40),
+        );
+      } else {
+        ensureFont(40);
+      }
+    } catch {
+      ensureFont(0);
+    }
+
+    return () => {
+      alive = false;
+    };
+  }, [portrait, custom, name, text, font, char, emote, costume, boxType, boxUrl, assetTick, imgRetry]);
 
   // Decide blank-box size the same way the original did, and keep it live:
   // the generic db-main-{small,medium,large} art swaps with the measured name width.
@@ -315,33 +382,42 @@ export default function P5Canvas(props: Props) {
     const kind = w <= 195 ? 'small' : w <= 275 ? 'medium' : 'large';
     setBlankKind((k) => (k === kind ? k : kind));
     onBoxArt?.(kind);
-  }, [name, font, boxType]);
+  }, [name, font, boxType, onBoxArt]);
+
+  const onPortraitError = () => {
+    if (imgRetry === 0 && portrait) {
+      setImgRetry(1);
+    } else {
+      bump();
+    }
+  };
 
   return (
     <div className="canvas-frame">
       <canvas ref={canvasRef} id="dialogueCanvas" width={W} height={H} />
-      <img ref={bgRef} className="hidden-img" alt="" src="img/p5-background.png" crossOrigin="anonymous" />
+      <img ref={bgRef} className="hidden-img" alt="" src="img/p5-background.png" crossOrigin="anonymous" onLoad={bump} onError={bump} />
       {portrait && char !== 'None' ? (
         <img
           ref={portraitRef}
           className="hidden-img"
           alt="portrait"
-          src={portrait}
+          src={imgRetry ? withCacheBuster(portrait) : portrait}
           crossOrigin="anonymous"
+          onLoad={bump}
+          onError={onPortraitError}
         />
       ) : null}
       {custom ? (
-        <img ref={customRef} className="hidden-img" alt="custom portrait" src={custom} crossOrigin="anonymous" />
+        <img ref={customRef} className="hidden-img" alt="custom portrait" src={custom} crossOrigin="anonymous" onLoad={bump} onError={bump} />
       ) : null}
       <img
-        ref={(el) => {
-          (boxRef as React.MutableRefObject<HTMLImageElement | null>).current = el;
-          if (el) boxUrlRef.current = boxUrl;
-        }}
+        ref={boxRef}
         className="hidden-img"
         alt="dialogue box"
         src={boxUrl}
         crossOrigin="anonymous"
+        onLoad={bump}
+        onError={bump}
       />
     </div>
   );

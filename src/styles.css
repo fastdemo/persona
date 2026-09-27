@@ -36,12 +36,12 @@ body {
 }
 
 body[data-game='P4'] {
-  --accent: #1c1c1e;
+  --accent: var(--gold);
   --accent-soft: rgba(242, 194, 48, 0.16);
   background:
-    radial-gradient(1000px 460px at 90% -10%, rgba(242, 194, 48, 0.16), transparent 60%),
-    radial-gradient(800px 420px at -10% 0%, rgba(255, 255, 255, 0.05), transparent 55%),
-    #111113;
+    radial-gradient(1100px 500px at 85% -10%, rgba(242, 194, 48, 0.14), transparent 60%),
+    radial-gradient(900px 480px at -10% 10%, rgba(242, 194, 48, 0.06), transparent 55%),
+    var(--bg);
 }
 
 ::selection {
@@ -127,7 +127,8 @@ a {
   width: 46px;
   height: 46px;
   border-radius: 12px;
-  background: var(--accent);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
   display: grid;
   place-items: center;
   overflow: hidden;
@@ -136,9 +137,9 @@ a {
 }
 
 .brand-mark img {
-  width: 34px;
-  height: 34px;
-  object-fit: contain;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .brand h1 {
@@ -182,7 +183,6 @@ a {
 }
 
 body[data-game='P4'] .game-switch button[aria-pressed='true'] {
-  background: var(--gold);
   color: #191204;
 }
 
@@ -365,6 +365,43 @@ textarea {
   box-shadow: 0 18px 50px rgba(0, 0, 0, 0.4);
   position: relative;
   overflow: hidden;
+  min-height: 220px;
+}
+
+.canvas-card[data-ready='false'] .canvas-frame {
+  visibility: hidden;
+}
+
+.canvas-loading {
+  position: absolute;
+  inset: 14px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 12.5px;
+  letter-spacing: 0.06em;
+}
+
+.canvas-loading[hidden] {
+  display: none;
+}
+
+.canvas-spinner {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 3px solid var(--line);
+  border-top-color: var(--accent);
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .canvas-card::before {
@@ -420,7 +457,6 @@ textarea {
 }
 
 body[data-game='P4'] .btn-primary {
-  background: var(--gold);
   color: #191204;
 }
 
@@ -518,5 +554,10 @@ body[data-game='P4'] .btn-primary {
   *::after {
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
+  }
+
+  .canvas-spinner {
+    animation: none;
+    border-top-color: var(--line);
   }
 }

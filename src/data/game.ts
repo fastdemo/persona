@@ -1,6 +1,6 @@
 import catalogP5 from './catalogP5';
 import catalogP4 from './catalogP4';
-import { findNameBox } from '../engine/p5/findName';
+import { findNameAfterCharSelect, findNameBox } from '../engine/p5/findName';
 
 export const S3_P5 = 'https://testing-s3-p5.s3.amazonaws.com/portraits';
 export const S3_P4 = 'https://p4generator.s3.amazonaws.com/portraits';
@@ -156,8 +156,10 @@ export const catalogOf = (game: Game) =>
 export const charListOf = (game: Game) => Object.keys(catalogOf(game)).sort((a, b) => a.localeCompare(b));
 
 export const displayNameOf = (game: Game, char: string) => {
-  const map = game === 'P5' ? DISPLAY_NAMES_P5 : DISPLAY_NAMES_P4;
-  return map[char] ?? char;
+  if (game === 'P4') return DISPLAY_NAMES_P4[char] ?? char;
+  // P5 keeps the legacy auto-fill names (Joker -> Joker, Akira -> Akira, ...),
+  // which double as the nameplate art keys.
+  return findNameAfterCharSelect(char) ?? DISPLAY_NAMES_P5[char] ?? char;
 };
 
 export const defaultOf = (game: Game) =>
