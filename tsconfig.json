@@ -1,15 +1,18 @@
 {
   "compilerOptions": {
     "jsx": "react-jsx",
-    "module": "commonjs",
-    "outDir": "./build/",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "target": "ES2020",
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "strict": true,
     "esModuleInterop": true,
-    "preserveConstEnums": true,
-    "removeComments": true,
-    "sourceMap": true,
-    "target": "es5"
+    "allowJs": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true
   },
-  "include": [
-    "assets/index.tsx"
-  ]
+  "include": ["src", "scripts/generate-catalog.mjs"]
 }
