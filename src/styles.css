@@ -417,11 +417,18 @@ textarea {
   line-height: 0;
   border-radius: 8px;
   overflow: hidden;
+  aspect-ratio: 1275 / 500;
+  background: #0a0a0a;
+}
+
+body[data-game='P4'] .canvas-frame {
+  aspect-ratio: 1275 / 800;
+  background: #fee727;
 }
 
 .canvas-frame canvas {
   width: 100%;
-  height: auto;
+  height: 100%;
   display: block;
 }
 

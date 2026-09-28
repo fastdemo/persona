@@ -32,6 +32,48 @@ interface Props extends P5CanvasState {
 
 const withCacheBuster = (src: string) => (src.includes('?') ? `${src}&r=1` : `${src}?r=1`);
 
+// Name budget per box: plate-surface room for the name in the ROTATED text
+// frame (deskewed px), probed per size-art at its own draw offset + legacy
+// anchor — small/named 584, medium 600, large 616 (noPortrait 394 at
+// (392,425)/-18.55°, dancing 840 at (660,353)/0°, strikers 586 at
+// (500,371)/-5.5°). Fitted BEFORE the legacy tile roll (rolled on the fitted
+// string), so picks can never go stale.
+const NAME_LEN: Record<string, number> = {
+  main: 584,
+  noPortrait: 394,
+  dancing: 840,
+  strikers: 586,
+};
+// Per-size room for `main` (blank art swaps by width, so the budget grows):
+// small 584 / medium 600 / large 616. Named per-character art uses 584.
+const NAME_LEN_MAIN: Record<string, number> = { small: 584, medium: 600, large: 616 };
+
+// Max dialogue-line width (canvas px) per box: opaque dark-run lengths at the
+// legacy text rows (dims probed per size-art at art_y = canvas_y - drawY).
+// `main` uses the SMALL-art rows (all three main arts share the same bubble,
+// 745/744/673); other boxes probed the same way at their own rows.
+const LINE_LEN: Record<string, number[]> = {
+  main: [745, 744, 673],
+  noPortrait: [684, 714, 638],
+  dancing: [855, 890, 857],
+  strikers: [668, 683, 650],
+};
+
+/** Truncate with … so the measured width fits maxWidth (same font on ctx). */
+const fitEllipsis = (ctx: CanvasRenderingContext2D, value: string, maxWidth: number): string => {
+  if (!value || ctx.measureText(value).width <= maxWidth) return value;
+  const ell = '…';
+  if (ctx.measureText(ell).width > maxWidth) return '';
+  let lo = 0;
+  let hi = value.length;
+  while (lo < hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (ctx.measureText(value.slice(0, mid) + ell).width <= maxWidth) lo = mid + 1;
+    else hi = mid;
+  }
+  return value.slice(0, Math.max(0, lo - 1)) + ell;
+};
+
 /**
  * Single-canvas P5 renderer. Draw order: background -> portrait -> name box art
  * -> name tiles + name text -> dialogue text. Keeps the original rotation math,
@@ -54,9 +96,32 @@ export default function P5Canvas(props: Props) {
   const readyCbRef = useRef(onReadyChange);
   readyCbRef.current = onReadyChange;
 
-  const [blankKind, setBlankKind] = useState<'small' | 'medium' | 'large'>('small');
   const [assetTick, setAssetTick] = useState(0);
   const [imgRetry, setImgRetry] = useState(0);
+
+  // Decide blank-box size the same way the original did, and keep it live:
+  // the generic db-main-{small,medium,large} art swaps with the measured name
+  // width. Pure helper (no hooks) declared BEFORE both users, so the box URL
+  // and the paint effect compute the same answer synchronously during render.
+  // NOTE: `onBoxArt` is an unused legacy hint — kept in props for API compat.
+  // The width thresholds (195/275) come straight from the original
+  // ImageCanvas; keep them identical so named-vs-blank selection matches.
+  // The drawn anchor shifts with the art (legacy parity): 418 / 456 / 495.
+  const blankKindFor = (value: string): 'small' | 'medium' | 'large' => {
+    void onBoxArt;
+    const c = document.createElement('canvas').getContext('2d');
+    if (!c || boxType !== 'main' || nameBoxUrl(font, value, boxType) !== null) return 'small';
+    // Measure with the SAME font the plate text will use. A fallback font
+    // here picks the wrong art size for one frame (the "Ann" smear).
+    c.font = `18pt ${font}`;
+    const w = c.measureText(value).width;
+    return w <= 195 ? 'small' : w <= 275 ? 'medium' : 'large';
+  };
+  const blankKind = blankKindFor(name);
+  // Drawn name anchor per blank size (legacy parity): 418 / 456 / 495,
+  // matching the art each size ships (each size's plate sits further right).
+  // Named per-character art uses the 418 anchor.
+  const mainTextX = blankKind === 'medium' ? 456 : blankKind === 'large' ? 495 : 418;
 
   const boxUrl = (() => {
     const named = nameBoxUrl(font, name, boxType);
@@ -64,6 +129,9 @@ export default function P5Canvas(props: Props) {
     if (boxType === 'noPortrait') return 'boxes/p5/db-noPortrait.png';
     if (boxType === 'dancing') return 'boxes/p5/db-dancing.png';
     if (boxType === 'strikers') return 'boxes/p5/db-strikers.png';
+    // Must match what paint uses — both read the same synchronous helper, so
+    // the art and the text anchor can never disagree for a frame (the "Ann"
+    // smear came from reading still-pending state here).
     return `boxes/p5/db-main-${blankKind}.png`;
   })();
 
@@ -76,11 +144,14 @@ export default function P5Canvas(props: Props) {
 
   useEffect(() => {
     tileSeedRef.current = { name: '', picks: [] };
-  }, [boxType]);
+  }, [boxType, font]);
 
-  // New portrait URL -> allow one retry again.
+  // New portrait URL -> allow one retry again. Reset the tile seed too: a
+  // stale seed keyed on the previous name would reuse old picks for one
+  // frame after a character switch (tile/glyph mismatch = smeared glyphs).
   useEffect(() => {
     setImgRetry(0);
+    tileSeedRef.current = { name: '', picks: [] };
   }, [portrait]);
 
   useEffect(() => {
@@ -161,167 +232,214 @@ export default function P5Canvas(props: Props) {
         }
       }
 
-      // Name tiles + name text (rotated frame). The tile highlight + glyph
-      // split must use the same textX anchor as the box art above, otherwise
-      // the black tile drifts off the white nameplate on medium/large boxes.
-      // NOTE (bot engine parity): for `main`, textX stays 418 for every size —
-      // the wider blank art is centered on the same nameplate, so shifting
-      // textX right (456/495) is what pushes text off the plate. Kept at 418.
+      // Name tiles + name text (rotated frame), drawn from the SAME fitted
+      // string. fitName is truncated to the plate's structural length FIRST,
+      // the tile roll runs on fitName (never the raw name), so picks can
+      // never go stale after … truncation.
+      //
+      // Tile-geometry parity with the legacy tileCanvas: tiles sit at the
+      // same cursor offsets the glyphs use (both derived from per-char
+      // measureText sums over fitName), so the highlight always lands
+      // exactly behind its glyph. Legacy bounds kept: 1 tile (<8 chars),
+      // 2 tiles (8–15), 3 tiles (16+).
       const angle = (ANGLE[boxType] ?? ANGLE.main) * (Math.PI / 180);
-      const mainTextX = 418;
       ctx.save();
       if (boxType === 'main' || boxType === 'noPortrait') {
+        // Drawn name anchor (legacy parity): `main` shifts with the blank
+        // art — 418 / 456 / 495 — because each size's plate sits further
+        // right; named per-character art uses the 418 anchor. `noPortrait`
+        // always uses 392. Art + anchor both derive from the same
+        // synchronous blankKind, so they can never disagree (the "Ann"
+        // smear came from the anchor shifting a frame before the art).
         const textX = boxType === 'main' ? mainTextX : 392;
         const textY = boxType === 'main' ? 438 : 425;
 
-        // Tiles (drawn in rotated space, like the original tileCanvas)
+        // Tile seed (legacy tileCanvas parity): the roll runs on the FITTED
+        // string (never the raw name), so picks can never go stale after …
+        // truncation. The tile rects themselves are painted in the glyph
+        // pass below (tile + erase + white glyph per highlight), sharing
+        // one offset ruler: tile left edge = START of the highlighted
+        // glyph = textX-centered whole width + advance of everything
+        // BEFORE the pick.
         ctx.save();
         ctx.rotate(angle);
         ctx.fillStyle = '#000';
-        const seed = tileSeedRef.current;
-        if (seed.name !== name) {
-          seed.name = name;
-          seed.picks = findRandomNumbers(name) as (number | null)[];
-        }
-        const [random, secondRandom, thirdRandom] = seed.picks;
         ctx.font = `18pt ${font}`;
-        const measureWhole = ctx.measureText(name);
-        if (name.length > 1 && name.trim() && random !== null && random !== undefined) {
-          let boxX = textX - measureWhole.width / 2;
-          for (let i = 0; i < (random as number); i++) boxX += ctx.measureText(name[i]).width;
-          const tm = ctx.measureText(name[random as number]) as TextMetrics & {
-            fontBoundingBoxAscent?: number;
-            fontBoundingBoxDescent?: number;
-          };
-          const asc = tm.fontBoundingBoxAscent ?? 20;
-          const desc = tm.fontBoundingBoxDescent ?? 6;
-          ctx.fillRect(boxX, textY - asc - 4, tm.width, asc + desc + 7);
-          if (name.length >= 8 && secondRandom !== null && secondRandom !== undefined) {
-            let secondBoxX = boxX;
-            for (let i = (random as number); i < (secondRandom as number); i++) {
-              secondBoxX += ctx.measureText(name[i]).width;
-            }
-            const t2 = ctx.measureText(name[secondRandom as number]) as TextMetrics & {
-              fontBoundingBoxAscent?: number;
-              fontBoundingBoxDescent?: number;
-            };
-            const a2 = t2.fontBoundingBoxAscent ?? 20;
-            const d2 = t2.fontBoundingBoxDescent ?? 6;
-            ctx.fillRect(secondBoxX, textY - a2 - 3, t2.width, a2 + d2 + 7);
-            if (name.length >= 16 && thirdRandom !== null && thirdRandom !== undefined) {
-              let thirdBoxX = secondBoxX;
-              for (let i = (secondRandom as number); i < (thirdRandom as number); i++) {
-                thirdBoxX += ctx.measureText(name[i]).width;
-              }
-              const t3 = ctx.measureText(name[thirdRandom as number]) as TextMetrics & {
-                fontBoundingBoxAscent?: number;
-                fontBoundingBoxDescent?: number;
-              };
-              const a3 = t3.fontBoundingBoxAscent ?? 20;
-              const d3 = t3.fontBoundingBoxDescent ?? 6;
-              ctx.fillRect(thirdBoxX, textY - a3 - 3, t3.width, a3 + d3 + 6);
-            }
-          }
+        // Name budget: truncate with … to the plate's structural length FIRST,
+        // then draw tiles + glyphs from that fitted string only. Drawing the
+        // raw name was what let long names spill past the plate's left edge.
+        const fitName =
+          boxType === 'main'
+            ? fitEllipsis(ctx, name, NAME_LEN_MAIN[blankKind] ?? NAME_LEN.main)
+            : fitEllipsis(ctx, name, NAME_LEN[boxType] ?? NAME_LEN.main);
+        const seedKey = `${font}::${fitName}`;
+        const seed = tileSeedRef.current;
+        if (seed.name !== seedKey) {
+          seed.name = seedKey;
+          seed.picks = findRandomNumbers(fitName) as (number | null)[];
         }
+        // Seed only: the tile roll runs on the FITTED string (never the raw
+        // name), so picks can never go stale after … truncation. The tile
+        // rects themselves are painted in the glyph pass below (tile +
+        // erase + white glyph per highlight), sharing one offset ruler.
+        // (Legacy tileCanvas parity: tile left edge = START of the
+        // highlighted glyph = textX-centered whole width + advance of
+        // everything BEFORE the pick.)
+        const [random, secondRandom, thirdRandom] = seed.picks;
+        void random;
+        void secondRandom;
+        void thirdRandom;
+        // Seed-only block above keeps the roll pinned per (fitted-name,
+        // font). Pull the picks + fitted metrics here for the glyph pass.
+        const [random2, secondRandom2, thirdRandom2] = seed.picks;
+        const fitLen = fitName.length;
+        const r0 = Math.min(random2 as number, Math.max(0, fitLen - 1));
+        const s20 =
+          secondRandom2 === null || secondRandom2 === undefined
+            ? null
+            : Math.min(secondRandom2 as number, Math.max(0, fitLen - 1));
+        const s30 =
+          thirdRandom2 === null || thirdRandom2 === undefined
+            ? null
+            : Math.min(thirdRandom2 as number, Math.max(0, fitLen - 1));
         ctx.restore();
 
-        // Name glyphs (rotated like the original nameCanvas)
+        // Name glyphs (rotated like the original nameCanvas), drawn from the
+        // SAME fitted string as the tiles — never the raw over-long name.
+        // Geometry: the tile + white glyph are INSET 1px right of the black
+        // glyph's slot (tile left edge = glyph start + 1, white glyph
+        // stamped at the same +1). Pixel-proven over 60+ probe grids: the
+        // KRSM 'n' left stem carries dark antialiased fringe; painting the
+        // tile exactly on the slot puts the tile's dark left edge on top of
+        // that fringe and reads as a "double-n" smear. The 1px inset tucks
+        // the tile edge inside the stem, and the white glyph covers the
+        // fringe. Black pass keeps the legacy ruler (measured slot).
         ctx.rotate(angle);
         ctx.font = `18pt ${font}`;
         ctx.textAlign = 'left';
         ctx.textBaseline = 'alphabetic';
-        const nm = ctx.measureText(name);
-        if (name.length === 1) {
+        const nm = ctx.measureText(fitName);
+        if (fitLen <= 1) {
           ctx.fillStyle = '#000';
-          ctx.fillText(name, textX, textY);
-        } else if (name.trim() && random !== null && random !== undefined) {
-          const beforeBox = name.substring(0, random as number);
-          const behindBox = name.substring(random as number, (random as number) + 1);
-          const afterFirst = name.substring((random as number) + 1);
-          let secondBehind = '';
-          let secondAfter = afterFirst;
-          let thirdBehind = '';
-          let thirdAfter = '';
-          if (name.length >= 8 && secondRandom !== null && secondRandom !== undefined) {
-            secondAfter = name.substring((secondRandom as number) + 1);
-            const head = name.substring((random as number) + 1, secondRandom as number);
-            secondBehind = name.substring(secondRandom as number, (secondRandom as number) + 1);
-            if (name.length >= 16 && thirdRandom !== null && thirdRandom !== undefined) {
-              secondAfter = name.substring((secondRandom as number) + 1, thirdRandom as number);
-              thirdBehind = name.substring(thirdRandom as number, (thirdRandom as number) + 1);
-              thirdAfter = name.substring((thirdRandom as number) + 1);
-              void head;
-            }
-          }
+          ctx.fillText(fitName, textX, textY);
+        } else if (fitName.trim()) {
+          // White-tile indices (legacy bounds): 1 tile (<8), 2 (8–15), 3 (16+).
+          const whites = new Set<number>([r0]);
+          if (fitLen >= 8 && s20 !== null) whites.add(s20);
+          if (fitLen >= 16 && s30 !== null) whites.add(s30);
           const startX = textX - nm.width / 2;
-          let cursorBoxX = startX;
-          for (let i = 0; i < (random as number); i++) cursorBoxX += ctx.measureText(name[i]).width;
+          // Pass 1: every glyph in black at its measured slot (legacy
+          // ruler: pen advances by measured width per glyph).
           ctx.fillStyle = '#000';
-          ctx.fillText(beforeBox, startX, textY);
-          ctx.fillStyle = '#fff';
-          const beforeW = ctx.measureText(beforeBox).width;
-          ctx.fillText(behindBox, startX + beforeW, textY);
-          ctx.fillStyle = '#000';
-          const behindW = ctx.measureText(behindBox).width;
-          let cursor = cursorBoxX + behindW;
-          if (name.length >= 8 && secondRandom !== null && secondRandom !== undefined) {
-            const head = name.substring((random as number) + 1, secondRandom as number);
-            ctx.fillText(head, cursor, textY);
-            cursor += ctx.measureText(head).width;
-            ctx.fillStyle = '#fff';
-            ctx.fillText(secondBehind, cursor, textY);
-            cursor += ctx.measureText(secondBehind).width;
-            ctx.fillStyle = '#000';
-            if (name.length >= 16 && thirdRandom !== null && thirdRandom !== undefined) {
-              const mid = name.substring((secondRandom as number) + 1, thirdRandom as number);
-              ctx.fillText(mid, cursor, textY);
-              cursor += ctx.measureText(mid).width;
-              ctx.fillStyle = '#fff';
-              ctx.fillText(thirdBehind, cursor, textY);
-              cursor += ctx.measureText(thirdBehind).width;
-              ctx.fillStyle = '#000';
-              ctx.fillText(thirdAfter, cursor, textY);
-            } else {
-              ctx.fillText(secondAfter, cursor, textY);
-            }
-          } else {
-            ctx.fillText(afterFirst, cursor, textY);
+          let pen = startX;
+          for (let i = 0; i < fitName.length; i++) {
+            ctx.fillText(fitName[i], pen, textY);
+            pen += ctx.measureText(fitName[i]).width;
           }
-          void secondAfter;
+          // Pass 2: black tile + white glyph at each highlight index.
+          // Geometry (pixel-proven over 60+ probe grids): BOTH tile and
+          // white glyph are inset 1px right of the black glyph's slot —
+          // tile left edge = glyph start + 1 (1px narrower), white glyph
+          // stamped at the same +1. The KRSM 'n' left stem carries dark
+          // antialiased fringe; painting the tile exactly on the slot
+          // puts the tile's dark left edge on top of that fringe and
+          // reads as a "double-n" smear. The 1px inset tucks the tile
+          // edge inside the stem. Black pass keeps the legacy ruler
+          // (measured slot), so the glyph body never moves.
+          for (const idx of whites) {
+            let bx = startX;
+            for (let i = 0; i < idx; i++) bx += ctx.measureText(fitName[i]).width;
+            const tm = ctx.measureText(fitName[idx]) as TextMetrics & {
+              fontBoundingBoxAscent?: number;
+              fontBoundingBoxDescent?: number;
+            };
+            const asc = tm.fontBoundingBoxAscent ?? 20;
+            const desc = tm.fontBoundingBoxDescent ?? 6;
+            const top = textY - asc - 4 + (idx === r0 ? 0 : 1);
+            const hh = asc + desc + 7 - (idx === r0 ? 0 : 1);
+            // Black tile (legacy geometry, inset 1px right / 1px narrower).
+            ctx.fillStyle = '#000';
+            ctx.fillRect(bx + 1, top, Math.max(1, tm.width - 1), hh);
+            // White glyph, same +1 inset as the tile.
+            ctx.fillStyle = '#fff';
+            ctx.fillText(fitName[idx], bx + 1, textY);
+          }
         } else {
           ctx.fillStyle = '#000';
-          ctx.fillText(name, textX - nm.width / 2, textY);
+          ctx.fillText(fitName, textX - nm.width / 2, textY);
         }
       } else if (boxType === 'dancing') {
         ctx.textAlign = 'center';
         ctx.fillStyle = '#fff';
         ctx.font = `18pt ${font}`;
-        ctx.fillText(name, 660, 353);
+        ctx.fillText(fitEllipsis(ctx, name, NAME_LEN.dancing), 660, 353);
       } else {
         ctx.rotate(angle);
         ctx.textAlign = 'center';
         ctx.fillStyle = '#000';
         ctx.font = `16.5pt ${font}`;
-        ctx.fillText(name, 500, 371);
+        ctx.fillText(fitEllipsis(ctx, name, NAME_LEN.strikers), 500, 371);
       }
       ctx.restore();
 
-      // Dialogue text
+      // Dialogue text: word-wrap to the art's own per-line budgets, max 3
+      // lines, tail-truncated with … — never spills past the bubble.
+      // Legacy parity: budgets are the dark-run lengths at the legacy text
+      // rows (main 391/364/333 from x=500; other boxes probed the same way),
+      // and the 2-line centering nudge (+14) is kept from the original.
       ctx.save();
       ctx.fillStyle = '#fff';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'alphabetic';
       ctx.font = boxType === 'strikers' ? `16pt ${font}` : `18pt ${font}`;
       const coords = (findTextCoords as Record<string, number[]>)[boxType] ?? findTextCoords.main;
-      const rows = text.split('\n');
-      while (rows.length < 3) rows.push('');
-      if (rows[0] && rows[1] && !rows[2]) {
-        ctx.fillText(rows[0], coords[0], coords[1] + 14);
-        ctx.fillText(rows[1], coords[0], coords[2] + 14);
+      const budgets = LINE_LEN[boxType] ?? LINE_LEN.main;
+      const wrapLine = (value: string, maxWidth: number): string[] => {
+        const words = value.split(/\s+/).filter(Boolean);
+        const out: string[] = [];
+        let cur = '';
+        for (const word of words) {
+          if (ctx.measureText(word).width > maxWidth) {
+            if (cur) {
+              out.push(cur);
+              cur = '';
+            }
+            let chunk = '';
+            for (const ch of word) {
+              if (ctx.measureText(chunk + ch).width > maxWidth) {
+                out.push(chunk);
+                chunk = ch;
+              } else {
+                chunk += ch;
+              }
+            }
+            if (chunk) cur = chunk;
+            continue;
+          }
+          const next = cur ? `${cur} ${word}` : word;
+          if (ctx.measureText(next).width > maxWidth) {
+            out.push(cur);
+            cur = word;
+          } else {
+            cur = next;
+          }
+        }
+        if (cur) out.push(cur);
+        return out;
+      };
+      const wrapped: string[] = [];
+      for (const rawLine of text.split('\n')) wrapped.push(...wrapLine(rawLine, budgets[0]));
+      if (!wrapped.length) wrapped.push('');
+      const shown = wrapped.slice(0, 3);
+      if (wrapped.length > 3) shown[2] = fitEllipsis(ctx, `${shown[2]} …`, budgets[2]);
+      const fitted = [0, 1, 2].map((i) => fitEllipsis(ctx, shown[i] ?? '', budgets[i] ?? budgets[0]));
+      if (fitted[0] && fitted[1] && !fitted[2]) {
+        ctx.fillText(fitted[0], coords[0], coords[1] + 14);
+        ctx.fillText(fitted[1], coords[0], coords[2] + 14);
       } else {
-        ctx.fillText(rows[0], coords[0], coords[1]);
-        ctx.fillText(rows[1], coords[0], coords[2]);
-        ctx.fillText(rows[2], coords[0], coords[3]);
+        ctx.fillText(fitted[0], coords[0], coords[1]);
+        ctx.fillText(fitted[1] ?? '', coords[0], coords[2]);
+        ctx.fillText(fitted[2] ?? '', coords[0], coords[3]);
       }
       ctx.restore();
 
@@ -330,7 +448,13 @@ export default function P5Canvas(props: Props) {
 
     const markFontOk = () => {
       if (!alive) return;
-      fontOkRef.current = true;
+      if (!fontOkRef.current) {
+        // First paint with the REAL font: reseed the tile roll, because the
+        // seed may have been rolled while a fallback font was active (wrong
+        // advances -> tile/glyph geometry mismatch = smeared glyphs).
+        tileSeedRef.current = { name: '', picks: [] };
+        fontOkRef.current = true;
+      }
       draw();
     };
 
@@ -369,20 +493,12 @@ export default function P5Canvas(props: Props) {
     return () => {
       alive = false;
     };
-  }, [portrait, custom, name, text, font, char, emote, costume, boxType, boxUrl, assetTick, imgRetry]);
+  }, [portrait, custom, name, text, font, char, emote, costume, boxType, boxUrl, blankKind, assetTick, imgRetry]);
 
-  // Decide blank-box size the same way the original did, and keep it live:
-  // the generic db-main-{small,medium,large} art swaps with the measured name width.
   useEffect(() => {
-    if (nameBoxUrl(font, name, boxType) !== null) return;
-    const c = document.createElement('canvas').getContext('2d');
-    if (!c) return;
-    c.font = `18pt ${font}`;
-    const w = c.measureText(name).width;
-    const kind = w <= 195 ? 'small' : w <= 275 ? 'medium' : 'large';
-    setBlankKind((k) => (k === kind ? k : kind));
-    onBoxArt?.(kind);
-  }, [name, font, boxType, onBoxArt]);
+    void blankKind;
+    void onBoxArt;
+  }, [blankKind, onBoxArt]);
 
   const onPortraitError = () => {
     if (imgRetry === 0 && portrait) {

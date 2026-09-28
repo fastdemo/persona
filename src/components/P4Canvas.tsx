@@ -30,6 +30,35 @@ const BOX_POS: Record<string, number[]> = {
 
 const withCacheBuster = (src: string) => (src.includes('?') ? `${src}&r=1` : `${src}?r=1`);
 
+// P4 text budgets (canvas px), probed structurally from the shipped box art
+// (all values measured, not guessed):
+// - Name: plate top-edge at name x is y≈561 (golden) / y≈525 (vanilla); the
+//   plate is only ~55px tall there, so the name is capped to the plate's
+//   visible width before the slant cuts it: golden 480, vanilla 460.
+// - Dialogue: opaque bubble spans at the legacy text rows give per-line
+//   room from each line's x: golden [1165, 1162, 656], vanilla [1195, 1198,
+//   793] (line 3 starts where the plate tail cuts the bubble).
+const P4_NAME_LEN = { golden: 480, vanilla: 460 };
+const P4_LINE_LEN: Record<string, number[]> = {
+  golden: [1165, 1162, 656],
+  vanilla: [1195, 1198, 793],
+};
+
+/** Truncate with … so the measured width fits maxWidth (same font on ctx). */
+const fitEllipsis = (ctx: CanvasRenderingContext2D, value: string, maxWidth: number): string => {
+  if (!value || ctx.measureText(value).width <= maxWidth) return value;
+  const ell = '…';
+  if (ctx.measureText(ell).width > maxWidth) return '';
+  let lo = 0;
+  let hi = value.length;
+  while (lo < hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (ctx.measureText(value.slice(0, mid) + ell).width <= maxWidth) lo = mid + 1;
+    else hi = mid;
+  }
+  return value.slice(0, Math.max(0, lo - 1)) + ell;
+};
+
 /**
  * Single-canvas P4 renderer. Draw order: background -> portrait -> box back ->
  * box front -> name + dialogue text. Keeps the original positions, widths,
@@ -149,28 +178,69 @@ export default function P4Canvas(props: Props) {
         }
       }
 
-      // Text
+      // Text: fitted to the art's own budgets — name truncated to the plate,
+      // dialogue word-wrapped to max 3 lines with … tail. Never spills past
+      // the bubble or the plate edge.
       ctx.textAlign = 'left';
       ctx.textBaseline = 'alphabetic';
       ctx.font = `26pt ${font}`;
+      const fitName = fitEllipsis(ctx, name, P4_NAME_LEN[version as 'golden' | 'vanilla'] ?? 480);
       if (version === 'golden') {
         ctx.fillStyle = '#4B2A14';
-        ctx.fillText(name, 80, font === 'SkipStd-B' ? 615 : 612);
+        ctx.fillText(fitName, 80, font === 'SkipStd-B' ? 615 : 612);
       } else {
         ctx.fillStyle = '#000';
-        ctx.fillText(name, 85, font === 'SkipStd-B' ? 590 : 587);
+        ctx.fillText(fitName, 85, font === 'SkipStd-B' ? 590 : 587);
       }
       ctx.fillStyle = '#fff';
-      const rows = text.split('\n');
-      while (rows.length < 3) rows.push('');
+      const budgets = P4_LINE_LEN[version] ?? P4_LINE_LEN.golden;
+      const wrapLine = (value: string, maxWidth: number): string[] => {
+        const words = value.split(/\s+/).filter(Boolean);
+        const out: string[] = [];
+        let cur = '';
+        for (const word of words) {
+          if (ctx.measureText(word).width > maxWidth) {
+            if (cur) {
+              out.push(cur);
+              cur = '';
+            }
+            let chunk = '';
+            for (const ch of word) {
+              if (ctx.measureText(chunk + ch).width > maxWidth) {
+                out.push(chunk);
+                chunk = ch;
+              } else {
+                chunk += ch;
+              }
+            }
+            if (chunk) cur = chunk;
+            continue;
+          }
+          const next = cur ? `${cur} ${word}` : word;
+          if (ctx.measureText(next).width > maxWidth) {
+            out.push(cur);
+            cur = word;
+          } else {
+            cur = next;
+          }
+        }
+        if (cur) out.push(cur);
+        return out;
+      };
+      const wrapped: string[] = [];
+      for (const rawLine of text.split('\n')) wrapped.push(...wrapLine(rawLine, budgets[0]));
+      if (!wrapped.length) wrapped.push('');
+      const shown = wrapped.slice(0, 3);
+      if (wrapped.length > 3) shown[2] = fitEllipsis(ctx, `${shown[2]} …`, budgets[2]);
+      const fitted = [0, 1, 2].map((i) => fitEllipsis(ctx, shown[i] ?? '', budgets[i] ?? budgets[0]));
       if (version === 'golden') {
-        ctx.fillText(rows[0], 93, 670);
-        ctx.fillText(rows[1], 93, 715);
-        ctx.fillText(rows[2], 93, 760);
+        ctx.fillText(fitted[0], 93, 670);
+        ctx.fillText(fitted[1] ?? '', 93, 715);
+        ctx.fillText(fitted[2] ?? '', 93, 760);
       } else {
-        ctx.fillText(rows[0], 100, 645);
-        ctx.fillText(rows[1], 100, 690);
-        ctx.fillText(rows[2], 100, 735);
+        ctx.fillText(fitted[0], 100, 645);
+        ctx.fillText(fitted[1] ?? '', 100, 690);
+        ctx.fillText(fitted[2] ?? '', 100, 735);
       }
 
       report();
