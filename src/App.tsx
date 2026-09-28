@@ -252,7 +252,7 @@ export default function App() {
                 type="text"
                 value={name}
                 onChange={(e) => setName(cleanName(e.target.value))}
-                maxLength={48}
+                maxLength={120}
               />
             </div>
             <div className="field">
@@ -261,7 +261,7 @@ export default function App() {
                 id="textField"
                 rows={3}
                 value={text}
-                maxLength={220}
+                maxLength={600}
                 placeholder={
                   game === 'P5'
                     ? 'Hey, Inmate! Character portraits contain spoilers!'

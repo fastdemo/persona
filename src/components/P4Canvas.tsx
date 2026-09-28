@@ -30,18 +30,21 @@ const BOX_POS: Record<string, number[]> = {
 
 const withCacheBuster = (src: string) => (src.includes('?') ? `${src}&r=1` : `${src}?r=1`);
 
-// P4 text budgets (canvas px), probed structurally from the shipped box art
-// (all values measured, not guessed):
-// - Name: plate top-edge at name x is y≈561 (golden) / y≈525 (vanilla); the
-//   plate is only ~55px tall there, so the name is capped to the plate's
-//   visible width before the slant cuts it: golden 480, vanilla 460.
-// - Dialogue: opaque bubble spans at the legacy text rows give per-line
-//   room from each line's x: golden [1165, 1162, 656], vanilla [1195, 1198,
-//   793] (line 3 starts where the plate tail cuts the bubble).
-const P4_NAME_LEN = { golden: 480, vanilla: 460 };
+// P4 text budgets (canvas px), probed from the box art mapped to canvas
+// coords via BOX_POS (opaque spans, per text row):
+// - Name (26pt, left-aligned): the plate's left tip starts at x≈67 and the
+//   plate runs full-width at the name row, so a generous budget that only
+//   truncates past the art: golden 1060 from x=80, vanilla 1060 from x=85.
+//   Truncation happens at the art edge, never mid-plate.
+// - Dialogue (26pt, left-aligned): bubble left edge x≈61-63 on every line,
+//   right edge narrows per row (plate tail cuts in). Budgets measured from
+//   each line's x to the row's right edge minus padding:
+//   golden lines 670/715/760 → [1085, 1085, 580]; vanilla lines 645/690/735
+//   → [1100, 1100, 690]. Wrap fills all 3 rows before any … tail.
+const P4_NAME_LEN = { golden: 1060, vanilla: 1060 };
 const P4_LINE_LEN: Record<string, number[]> = {
-  golden: [1165, 1162, 656],
-  vanilla: [1195, 1198, 793],
+  golden: [1085, 1085, 580],
+  vanilla: [1100, 1100, 690],
 };
 
 /** Truncate with … so the measured width fits maxWidth (same font on ctx). */
@@ -118,6 +121,7 @@ export default function P4Canvas(props: Props) {
 
     const draw = () => {
       if (!alive) return;
+      report();
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.clearRect(0, 0, W, H);
 
@@ -227,12 +231,26 @@ export default function P4Canvas(props: Props) {
         if (cur) out.push(cur);
         return out;
       };
-      const wrapped: string[] = [];
-      for (const rawLine of text.split('\n')) wrapped.push(...wrapLine(rawLine, budgets[0]));
-      if (!wrapped.length) wrapped.push('');
-      const shown = wrapped.slice(0, 3);
-      if (wrapped.length > 3) shown[2] = fitEllipsis(ctx, `${shown[2]} …`, budgets[2]);
-      const fitted = [0, 1, 2].map((i) => fitEllipsis(ctx, shown[i] ?? '', budgets[i] ?? budgets[0]));
+      const queue: string[] = [];
+      for (const rawLine of text.split('\n')) queue.push(...wrapLine(rawLine, budgets[0]));
+      const rows: string[] = ['', '', ''];
+      for (let r = 0; r < 3 && queue.length > 0; r++) {
+        // Re-wrap the remainder to this row's own budget. Guard: wrapLine
+        // can return [] for an empty chunk — fall back to the raw chunk so
+        // a row is never silently dropped (dropped rows showed as
+        // "truncate too soon": 2 lines painted while text remained).
+        const rewrapped: string[] = [];
+        for (const q of queue) {
+          const w = wrapLine(q, budgets[r] ?? budgets[0]);
+          rewrapped.push(...(w.length ? w : [q]));
+        }
+        rows[r] = rewrapped[0] ?? '';
+        queue.splice(0, queue.length, ...rewrapped.slice(1));
+      }
+      const leftover = queue.length > 0;
+      if (!rows[0] && !rows[1] && !rows[2]) rows[0] = '';
+      const fitted = [0, 1, 2].map((i) => fitEllipsis(ctx, rows[i] ?? '', budgets[i] ?? budgets[0]));
+      if (leftover) fitted[2] = fitEllipsis(ctx, `${fitted[2]} …`, budgets[2]);
       if (version === 'golden') {
         ctx.fillText(fitted[0], 93, 670);
         ctx.fillText(fitted[1] ?? '', 93, 715);
@@ -242,8 +260,6 @@ export default function P4Canvas(props: Props) {
         ctx.fillText(fitted[1] ?? '', 100, 690);
         ctx.fillText(fitted[2] ?? '', 100, 735);
       }
-
-      report();
     };
 
     const markFontOk = () => {

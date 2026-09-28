@@ -32,12 +32,18 @@ interface Props extends P5CanvasState {
 
 const withCacheBuster = (src: string) => (src.includes('?') ? `${src}&r=1` : `${src}?r=1`);
 
-// Name budget per box: plate-surface room for the name in the ROTATED text
-// frame (deskewed px), probed per size-art at its own draw offset + legacy
-// anchor — small/named 584, medium 600, large 616 (noPortrait 394 at
+// Name budget per box: the name is CENTERED on its anchor, so the binding
+// limit is the TIGHTER side of the plate in the rotated text frame. Probed
+// per size-art at its own draw offset + legacy anchor (plate span at the
+// text row in the rotated frame):
+// small/named 584 / medium 600 / large 616 (noPortrait 394 at
 // (392,425)/-18.55°, dancing 840 at (660,353)/0°, strikers 586 at
 // (500,371)/-5.5°). Fitted BEFORE the legacy tile roll (rolled on the fitted
 // string), so picks can never go stale.
+// NOTE: an earlier revision used tiny budgets here (116/178/242) measured
+// from a misread probe (opaque zigzag span ABOVE the text row, not AT it).
+// Those truncated every normal name to ~5 chars ("Ann" fit, everything else
+// got …). The plate is ~580px wide at the text row — trust the at-row probe.
 const NAME_LEN: Record<string, number> = {
   main: 584,
   noPortrait: 394,
@@ -48,15 +54,19 @@ const NAME_LEN: Record<string, number> = {
 // small 584 / medium 600 / large 616. Named per-character art uses 584.
 const NAME_LEN_MAIN: Record<string, number> = { small: 584, medium: 600, large: 616 };
 
-// Max dialogue-line width (canvas px) per box: opaque dark-run lengths at the
-// legacy text rows (dims probed per size-art at art_y = canvas_y - drawY).
-// `main` uses the SMALL-art rows (all three main arts share the same bubble,
-// 745/744/673); other boxes probed the same way at their own rows.
+// Max dialogue-line width (canvas px) per box: dark-bubble interior at the
+// legacy text rows (white border walls subtracted, 14px right padding).
+// Probed per size-art at its own draw offset, dark runs only:
+// small [636,606,576] / medium [622,607,577] / large [637,607,577] — the
+// three main arts share ~the same bubble, so `main` uses one set:
+// [636,607,577]. noPortrait [615,644,567], dancing [749,761,772],
+// strikers [570,552,534]. Line 3 of every box is narrower (tail wedge) —
+// the wrap uses per-line budgets so line 3 truncates instead of overflowing.
 const LINE_LEN: Record<string, number[]> = {
-  main: [745, 744, 673],
-  noPortrait: [684, 714, 638],
-  dancing: [855, 890, 857],
-  strikers: [668, 683, 650],
+  main: [636, 607, 577],
+  noPortrait: [615, 644, 567],
+  dancing: [749, 761, 772],
+  strikers: [570, 552, 534],
 };
 
 /** Truncate with … so the measured width fits maxWidth (same font on ctx). */
@@ -107,6 +117,10 @@ export default function P5Canvas(props: Props) {
   // The width thresholds (195/275) come straight from the original
   // ImageCanvas; keep them identical so named-vs-blank selection matches.
   // The drawn anchor shifts with the art (legacy parity): 418 / 456 / 495.
+  // CRITICAL: measure the RAW name here, not the truncated fitName. Medium
+  // and large arts exist precisely to hold longer names — truncating first
+  // and then measuring would shrink every long name back to the small art
+  // (Image 2: the main plate never grew, so text spilled past the bubble).
   const blankKindFor = (value: string): 'small' | 'medium' | 'large' => {
     void onBoxArt;
     const c = document.createElement('canvas').getContext('2d');
@@ -178,6 +192,7 @@ export default function P5Canvas(props: Props) {
 
     const draw = () => {
       if (!alive) return;
+      report();
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.clearRect(0, 0, W, H);
 
@@ -248,19 +263,18 @@ export default function P5Canvas(props: Props) {
         // Drawn name anchor (legacy parity): `main` shifts with the blank
         // art — 418 / 456 / 495 — because each size's plate sits further
         // right; named per-character art uses the 418 anchor. `noPortrait`
-        // always uses 392. Art + anchor both derive from the same
-        // synchronous blankKind, so they can never disagree (the "Ann"
-        // smear came from the anchor shifting a frame before the art).
-        const textX = boxType === 'main' ? mainTextX : 392;
+        // centers on the plate middle (legacy 392 is left of plate center
+        // and makes long names spill left). Art + anchor both derive from
+        // the same synchronous blankKind, so they can never disagree (the
+        // "Ann" smear came from the anchor shifting a frame before the
+        // art). PLATE_CX values probed per art at the text row.
+        const textX = boxType === 'main' ? mainTextX : 725;
         const textY = boxType === 'main' ? 438 : 425;
 
-        // Tile seed (legacy tileCanvas parity): the roll runs on the FITTED
-        // string (never the raw name), so picks can never go stale after …
-        // truncation. The tile rects themselves are painted in the glyph
-        // pass below (tile + erase + white glyph per highlight), sharing
-        // one offset ruler: tile left edge = START of the highlighted
-        // glyph = textX-centered whole width + advance of everything
-        // BEFORE the pick.
+        // Tile seed: SKIPPED for `noPortrait` (legacy draws no tiles there —
+        // plain centered name). Rolling picks on every keystroke would also
+        // re-randomize the highlight each frame; main-only keeps it stable.
+        // The tile rects themselves are painted in the glyph pass below.
         ctx.save();
         ctx.rotate(angle);
         ctx.fillStyle = '#000';
@@ -272,25 +286,24 @@ export default function P5Canvas(props: Props) {
           boxType === 'main'
             ? fitEllipsis(ctx, name, NAME_LEN_MAIN[blankKind] ?? NAME_LEN.main)
             : fitEllipsis(ctx, name, NAME_LEN[boxType] ?? NAME_LEN.main);
-        const seedKey = `${font}::${fitName}`;
         const seed = tileSeedRef.current;
-        if (seed.name !== seedKey) {
-          seed.name = seedKey;
-          seed.picks = findRandomNumbers(fitName) as (number | null)[];
+        if (boxType === 'main') {
+          const seedKey = `${font}::${fitName}`;
+          if (seed.name !== seedKey) {
+            seed.name = seedKey;
+            seed.picks = findRandomNumbers(fitName) as (number | null)[];
+          }
         }
-        // Seed only: the tile roll runs on the FITTED string (never the raw
-        // name), so picks can never go stale after … truncation. The tile
-        // rects themselves are painted in the glyph pass below (tile +
-        // erase + white glyph per highlight), sharing one offset ruler.
-        // (Legacy tileCanvas parity: tile left edge = START of the
-        // highlighted glyph = textX-centered whole width + advance of
-        // everything BEFORE the pick.)
-        const [random, secondRandom, thirdRandom] = seed.picks;
-        void random;
-        void secondRandom;
-        void thirdRandom;
+        // Seed only (`main` only): the tile roll runs on the FITTED string
+        // (never the raw name), so picks can never go stale after …
+        // truncation. The tile rects themselves are painted in the glyph
+        // pass below (tile + white glyph per highlight), sharing one
+        // offset ruler. (Legacy tileCanvas parity: tile left edge = START
+        // of the highlighted glyph = textX-centered whole width + advance
+        // of everything BEFORE the pick.)
         // Seed-only block above keeps the roll pinned per (fitted-name,
-        // font). Pull the picks + fitted metrics here for the glyph pass.
+        // font) for `main`. Pull the picks + fitted metrics here for the
+        // glyph pass (`noPortrait` returns before using them).
         const [random2, secondRandom2, thirdRandom2] = seed.picks;
         const fitLen = fitName.length;
         const r0 = Math.min(random2 as number, Math.max(0, fitLen - 1));
@@ -322,6 +335,14 @@ export default function P5Canvas(props: Props) {
         if (fitLen <= 1) {
           ctx.fillStyle = '#000';
           ctx.fillText(fitName, textX, textY);
+        } else if (boxType === 'noPortrait') {
+          // Legacy parity: noPortrait draws NO tiles — plain centered name.
+          // The plate is straight and ~625px wide at the text row, centered
+          // near x≈725; center the fitted name on the PLATE (not the 392
+          // textX, which sits left of plate center) so long names grow
+          // evenly both ways and truncate before hitting either tip.
+          ctx.fillStyle = '#000';
+          ctx.fillText(fitName, 725 - nm.width / 2, textY);
         } else if (fitName.trim()) {
           // White-tile indices (legacy bounds): 1 tile (<8), 2 (8–15), 3 (16+).
           const whites = new Set<number>([r0]);
@@ -394,6 +415,8 @@ export default function P5Canvas(props: Props) {
       ctx.font = boxType === 'strikers' ? `16pt ${font}` : `18pt ${font}`;
       const coords = (findTextCoords as Record<string, number[]>)[boxType] ?? findTextCoords.main;
       const budgets = LINE_LEN[boxType] ?? LINE_LEN.main;
+      // Wrap EACH line to its own row budget (rows narrow toward the tail
+      // wedge), so a long line 1 can never push text past the bubble.
       const wrapLine = (value: string, maxWidth: number): string[] => {
         const words = value.split(/\s+/).filter(Boolean);
         const out: string[] = [];
@@ -428,11 +451,22 @@ export default function P5Canvas(props: Props) {
         return out;
       };
       const wrapped: string[] = [];
-      for (const rawLine of text.split('\n')) wrapped.push(...wrapLine(rawLine, budgets[0]));
-      if (!wrapped.length) wrapped.push('');
-      const shown = wrapped.slice(0, 3);
-      if (wrapped.length > 3) shown[2] = fitEllipsis(ctx, `${shown[2]} …`, budgets[2]);
-      const fitted = [0, 1, 2].map((i) => fitEllipsis(ctx, shown[i] ?? '', budgets[i] ?? budgets[0]));
+      // Fill row by row: each row wraps to ITS budget; overflow moves to the
+      // next row. Anything past row 3 folds into row 3 with a … tail.
+      const queue: string[] = [];
+      for (const rawLine of text.split('\n')) queue.push(...wrapLine(rawLine, budgets[0]));
+      const rows: string[] = ['', '', ''];
+      for (let r = 0; r < 3 && queue.length > 0; r++) {
+        // Re-wrap the remainder to this row's own (possibly narrower) budget.
+        const rewrapped: string[] = [];
+        for (const q of queue) rewrapped.push(...wrapLine(q, budgets[r] ?? budgets[0]));
+        rows[r] = rewrapped[0] ?? '';
+        queue.splice(0, queue.length, ...rewrapped.slice(1));
+      }
+      const leftover = queue.length > 0;
+      if (!rows[0] && !rows[1] && !rows[2]) rows[0] = '';
+      const fitted = [0, 1, 2].map((i) => fitEllipsis(ctx, rows[i] ?? '', budgets[i] ?? budgets[0]));
+      if (leftover) fitted[2] = fitEllipsis(ctx, `${fitted[2]} …`, budgets[2]);
       if (fitted[0] && fitted[1] && !fitted[2]) {
         ctx.fillText(fitted[0], coords[0], coords[1] + 14);
         ctx.fillText(fitted[1], coords[0], coords[2] + 14);
@@ -443,7 +477,6 @@ export default function P5Canvas(props: Props) {
       }
       ctx.restore();
 
-      report();
     };
 
     const markFontOk = () => {
