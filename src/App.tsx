@@ -177,11 +177,11 @@ export default function App() {
           </div>
         </div>
         <div className="game-switch" role="group" aria-label="Game">
-          <button type="button" aria-pressed={game === 'P5'} onClick={() => switchGame('P5')}>
-            Persona 5
-          </button>
           <button type="button" aria-pressed={game === 'P4'} onClick={() => switchGame('P4')}>
             Persona 4
+          </button>
+          <button type="button" aria-pressed={game === 'P5'} onClick={() => switchGame('P5')}>
+            Persona 5
           </button>
         </div>
       </header>
