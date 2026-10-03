@@ -31,20 +31,30 @@ const BOX_POS: Record<string, number[]> = {
 const withCacheBuster = (src: string) => (src.includes('?') ? `${src}&r=1` : `${src}?r=1`);
 
 // P4 text budgets (canvas px), probed from the box art mapped to canvas
-// coords via BOX_POS (opaque spans, per text row):
-// - Name (26pt, left-aligned): the plate's left tip starts at x≈67 and the
-//   plate runs full-width at the name row, so a generous budget that only
-//   truncates past the art: golden 1060 from x=80, vanilla 1060 from x=85.
-//   Truncation happens at the art edge, never mid-plate.
-// - Dialogue (26pt, left-aligned): bubble left edge x≈61-63 on every line,
-//   right edge narrows per row (plate tail cuts in). Budgets measured from
-//   each line's x to the row's right edge minus padding:
-//   golden lines 670/715/760 → [1085, 1085, 580]; vanilla lines 645/690/735
-//   → [1100, 1100, 690]. Wrap fills all 3 rows before any … tail.
-const P4_NAME_LEN = { golden: 1060, vanilla: 1060 };
+// coords via BOX_POS:
+// - Name (26pt, left-aligned, orange plate on the BACK layer): the plate
+//   is a thin slanted wedge far narrower than the box. Plate edges at the
+//   name band: golden x≈68..933 (text x=80) / vanilla x≈72..853 (text x=85).
+//   Safe budgets that keep text (plus …) on the plate: golden 780,
+//   vanilla 690. Truncate with … at the plate edge.
+// - Dialogue (26pt, left-aligned, white on dark bubble): bubble opaque
+//   spans: golden rows 670/715 run x≈61..1258, row 760 only x≈596..1252
+//   (transparent above the plate slope — a row starting at x=93 would be
+//   invisible). Golden rows 1-2 start x=93; the advance icon sits at
+//   x≈1177..1222 / y≈723..769, so row width caps before it: [1050, 1050].
+//   Row 3 sits on the front layer starting past the slope (x≈596) — budget
+//   from x=596 to the icon: 560. Vanilla rows 645/690 run full width
+//   (x≈63..1288, icon at x≈1184..1231 / y≈715..760 clips row 2's tail):
+//   [1060, 1050]; row 735 runs x≈495..1288, starting past the slope: 660.
+//   Wrap fills all 3 rows before any … tail; … only on true overflow.
+const P4_NAME_LEN = { golden: 780, vanilla: 690 };
 const P4_LINE_LEN: Record<string, number[]> = {
-  golden: [1085, 1085, 580],
-  vanilla: [1100, 1100, 690],
+  golden: [1050, 1050, 560],
+  vanilla: [1060, 1050, 660],
+};
+const P4_LINE_X: Record<string, number[]> = {
+  golden: [93, 93, 596],
+  vanilla: [100, 100, 495],
 };
 
 /** Truncate with … so the measured width fits maxWidth (same font on ctx). */
@@ -251,14 +261,15 @@ export default function P4Canvas(props: Props) {
       if (!rows[0] && !rows[1] && !rows[2]) rows[0] = '';
       const fitted = [0, 1, 2].map((i) => fitEllipsis(ctx, rows[i] ?? '', budgets[i] ?? budgets[0]));
       if (leftover) fitted[2] = fitEllipsis(ctx, `${fitted[2]} …`, budgets[2]);
+      const xs = P4_LINE_X[version] ?? P4_LINE_X.golden;
       if (version === 'golden') {
-        ctx.fillText(fitted[0], 93, 670);
-        ctx.fillText(fitted[1] ?? '', 93, 715);
-        ctx.fillText(fitted[2] ?? '', 93, 760);
+        ctx.fillText(fitted[0], xs[0], 670);
+        ctx.fillText(fitted[1] ?? '', xs[1], 715);
+        ctx.fillText(fitted[2] ?? '', xs[2], 760);
       } else {
-        ctx.fillText(fitted[0], 100, 645);
-        ctx.fillText(fitted[1] ?? '', 100, 690);
-        ctx.fillText(fitted[2] ?? '', 100, 735);
+        ctx.fillText(fitted[0], xs[0], 645);
+        ctx.fillText(fitted[1] ?? '', xs[1], 690);
+        ctx.fillText(fitted[2] ?? '', xs[2], 735);
       }
     };
 
