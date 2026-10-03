@@ -31,30 +31,29 @@ const BOX_POS: Record<string, number[]> = {
 const withCacheBuster = (src: string) => (src.includes('?') ? `${src}&r=1` : `${src}?r=1`);
 
 // P4 text budgets (canvas px), probed from the box art mapped to canvas
-// coords via BOX_POS:
+// coords via BOX_POS, composited back->front (front draws OVER back, text
+// over both — so the composite dark run is what matters, not the back
+// layer alone):
 // - Name (26pt, left-aligned, orange plate on the BACK layer): the plate
 //   is a thin slanted wedge far narrower than the box. Plate edges at the
 //   name band: golden x≈68..933 (text x=80) / vanilla x≈72..853 (text x=85).
 //   Safe budgets that keep text (plus …) on the plate: golden 780,
 //   vanilla 690. Truncate with … at the plate edge.
-// - Dialogue (26pt, left-aligned, white on dark bubble): bubble opaque
-//   spans: golden rows 670/715 run x≈61..1258, row 760 only x≈596..1252
-//   (transparent above the plate slope — a row starting at x=93 would be
-//   invisible). Golden rows 1-2 start x=93; the advance icon sits at
-//   x≈1177..1222 / y≈723..769, so row width caps before it: [1050, 1050].
-//   Row 3 sits on the front layer starting past the slope (x≈596) — budget
-//   from x=596 to the icon: 560. Vanilla rows 645/690 run full width
-//   (x≈63..1288, icon at x≈1184..1231 / y≈715..760 clips row 2's tail):
-//   [1060, 1050]; row 735 runs x≈495..1288, starting past the slope: 660.
-//   Wrap fills all 3 rows before any … tail; … only on true overflow.
+// - Dialogue (26pt, left-aligned, white on dark bubble): composite dark
+//   runs — golden rows 670/715/760 → x≈43..1242/1242/1179 (advance icon at
+//   x≈1180..1220 on row 3 only); vanilla rows 645/690/735 → x≈75..1274 on
+//   rows 1-2, x≈75..1183 on row 3 (icon at x≈1184..1231). All three rows
+//   start at the legacy x (93 golden / 100 vanilla) — the front layer
+//   covers the full row, so NO row-3 indent. Budgets run to the icon/bubble
+//   edge minus padding. Wrap fills all 3 rows before any … tail.
 const P4_NAME_LEN = { golden: 780, vanilla: 690 };
 const P4_LINE_LEN: Record<string, number[]> = {
-  golden: [1050, 1050, 560],
-  vanilla: [1060, 1050, 660],
+  golden: [1100, 1100, 1040],
+  vanilla: [1120, 1120, 1040],
 };
 const P4_LINE_X: Record<string, number[]> = {
-  golden: [93, 93, 596],
-  vanilla: [100, 100, 495],
+  golden: [93, 93, 93],
+  vanilla: [100, 100, 100],
 };
 
 /** Truncate with … so the measured width fits maxWidth (same font on ctx). */
